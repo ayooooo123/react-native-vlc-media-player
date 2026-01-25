@@ -182,6 +182,7 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
         builder.put("snapshot", 3);
         builder.put("setPipMode", 4);
         builder.put("updateVideoSurfaces", 5);
+        builder.put("setPipWindowSize", 6);
         return builder.build();
     }
 
@@ -215,6 +216,14 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
 
             case 5:
                 root.updateVideoSurfaces();
+                break;
+
+            case 6:
+                if (args != null && args.size() >= 2) {
+                    int width = args.getInt(0);
+                    int height = args.getInt(1);
+                    root.setPipWindowSize(width, height);
+                }
                 break;
 
             default:

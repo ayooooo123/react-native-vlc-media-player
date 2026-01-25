@@ -776,6 +776,16 @@ class ReactVlcPlayerView extends TextureView implements
         }
     }
 
+    public void setPipWindowSize(int width, int height) {
+        Log.i(TAG, "setPipWindowSize: " + width + "x" + height);
+        if (mMediaPlayer != null && width > 0 && height > 0) {
+            IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+            vlcOut.setWindowSize(width, height);
+            mVideoWidth = width;
+            mVideoHeight = height;
+        }
+    }
+
     public void updateVideoSurfaces() {
         if (mMediaPlayer == null) {
             Log.w(TAG, "updateVideoSurfaces: no media player");
