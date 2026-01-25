@@ -819,18 +819,6 @@ class ReactVlcPlayerView extends TextureView implements
         mVideoWidth = width;
         mVideoHeight = height;
         surfaceVideo = new Surface(surface);
-        if (mIsInPipMode || mPipModeTransitioning) {
-            Log.i(TAG, "onSurfaceTextureAvailable: skipping createPlayer during PiP transition, reattaching surface");
-            if (mMediaPlayer != null) {
-                IVLCVout vlcOut = mMediaPlayer.getVLCVout();
-                if (!vlcOut.areViewsAttached()) {
-                    vlcOut.setVideoSurface(surface);
-                    vlcOut.attachViews(onNewVideoLayoutListener);
-                }
-                vlcOut.setWindowSize(width, height);
-            }
-            return;
-        }
         createPlayer(true, false);
     }
 
@@ -841,10 +829,6 @@ class ReactVlcPlayerView extends TextureView implements
 
     @Override
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
-        if (mIsInPipMode || mPipModeTransitioning) {
-            Log.i(TAG, "onSurfaceTextureDestroyed: keeping surface during PiP transition");
-            return false;
-        }
         return true;
     }
 
