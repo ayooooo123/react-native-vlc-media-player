@@ -212,12 +212,10 @@ class ReactVlcPlayerView extends TextureView implements
 
         @Override
         public void onLayoutChange(View view, int i, int i1, int i2, int i3, int i4, int i5, int i6, int i7) {
-            if (mIsInPipMode || mPipModeTransitioning) {
-                return;
-            }
             if (view.getWidth() > 0 && view.getHeight() > 0) {
                 mVideoWidth = view.getWidth();
                 mVideoHeight = view.getHeight();
+                Log.d(TAG, "onLayoutChange: " + mVideoWidth + "x" + mVideoHeight + " pipMode=" + mIsInPipMode);
                 if (mMediaPlayer != null) {
                     IVLCVout vlcOut = mMediaPlayer.getVLCVout();
                     vlcOut.setWindowSize(mVideoWidth, mVideoHeight);
@@ -775,10 +773,6 @@ class ReactVlcPlayerView extends TextureView implements
                 mPipModeTransitioning = false;
                 Log.i(TAG, "PiP transition complete");
             }, 500);
-        }
-        
-        if (mMediaPlayer != null) {
-            updateVideoSurfaces();
         }
     }
 
