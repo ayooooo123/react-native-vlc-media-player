@@ -176,11 +176,13 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
 
     @Override
     public Map<String, Integer> getCommandsMap() {
-        return MapBuilder.of(
-            "startRecording", 1,
-            "stopRecording", 2,
-            "snapshot", 3
-        );
+        MapBuilder.Builder<String, Integer> builder = MapBuilder.builder();
+        builder.put("startRecording", 1);
+        builder.put("stopRecording", 2);
+        builder.put("snapshot", 3);
+        builder.put("setPipMode", 4);
+        builder.put("updateVideoSurfaces", 5);
+        return builder.build();
     }
 
     @Override
@@ -202,6 +204,17 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
                     String path = args.getString(0);
                     root.doSnapshot(path);
                 }
+                break;
+
+            case 4:
+                if (args != null && args.size() > 0 && !args.isNull(0)) {
+                    boolean isInPipMode = args.getBoolean(0);
+                    root.setPipMode(isInPipMode);
+                }
+                break;
+
+            case 5:
+                root.updateVideoSurfaces();
                 break;
 
             default:

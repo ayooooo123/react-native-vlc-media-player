@@ -68,6 +68,8 @@ class ReactVlcPlayerView extends TextureView implements
     private int preVolume = 100;
     private boolean autoAspectRatio = false;
     private boolean acceptInvalidCertificates = false;
+    private boolean mIsInPipMode = false;
+    private boolean mPipModeTransitioning = false;
 
     private float mProgressUpdateInterval = 0;
     private Handler mProgressUpdateHandler = new Handler();
@@ -110,7 +112,11 @@ class ReactVlcPlayerView extends TextureView implements
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        stopPlayback();
+        if (!mIsInPipMode && !mPipModeTransitioning) {
+            stopPlayback();
+        } else {
+            Log.i(TAG, "Skipping stopPlayback during PiP mode transition");
+        }
     }
 
     // LifecycleEventListener implementation
@@ -749,6 +755,56 @@ class ReactVlcPlayerView extends TextureView implements
     public void setAcceptInvalidCertificates(boolean accept) {
         this.acceptInvalidCertificates = accept;
         Log.i(TAG, "Set acceptInvalidCertificates to: " + accept);
+    }
+
+    public void setPipMode(boolean isInPipMode) {
+        Log.i(TAG, "setPipMode: " + isInPipMode + " (was: " + mIsInPipMode + ")");
+        boolean wasInPipMode = mIsInPipMode;
+        mIsInPipMode = isInPipMode;
+        
+        if (isInPipMode && !wasInPipMode) {
+            mPipModeTransitioning = true;
+        } else if (!isInPipMode && wasInPipMode) {
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                mPipModeTransitioning = false;
+                Log.i(TAG, "PiP transition complete");
+            }, 500);
+        }
+        
+        if (mMediaPlayer != null) {
+            updateVideoSurfaces();
+        }
+    }
+
+    public void updateVideoSurfaces() {
+        if (mMediaPlayer == null) {
+            Log.w(TAG, "updateVideoSurfaces: no media player");
+            return;
+        }
+        
+        Log.i(TAG, "updateVideoSurfaces called");
+        
+        IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+        int width = getWidth();
+        int height = getHeight();
+        
+        if (width > 0 && height > 0) {
+            vlcOut.setWindowSize(width, height);
+            Log.i(TAG, "Updated window size to: " + width + "x" + height);
+            
+            if (autoAspectRatio) {
+                mMediaPlayer.setAspectRatio(width + ":" + height);
+            }
+        }
+        
+        post(() -> {
+            requestLayout();
+            invalidate();
+        });
+    }
+
+    public boolean isInPipMode() {
+        return mIsInPipMode;
     }
 
     public void cleanUpResources() {
