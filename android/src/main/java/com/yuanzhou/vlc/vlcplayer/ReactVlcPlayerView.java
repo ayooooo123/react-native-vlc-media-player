@@ -139,16 +139,19 @@ class ReactVlcPlayerView extends TextureView implements
 
     @Override
     public void onHostPause() {
+        Log.i(TAG, "onHostPause: mIsInPipMode=" + mIsInPipMode + ", mPipModeTransitioning=" + mPipModeTransitioning);
+        if (mIsInPipMode || mPipModeTransitioning) {
+            Log.i(TAG, "Skipping pause during PiP mode");
+            return;
+        }
         if (!isPaused && mMediaPlayer != null) {
             isPaused = true;
             isHostPaused = true;
             mMediaPlayer.pause();
-            // this.getHolder().setKeepScreenOn(false);
             WritableMap map = Arguments.createMap();
             map.putString("type", "Paused");
             eventEmitter.onVideoStateChange(map);
         }
-        Log.i("onHostPause", "---------onHostPause------------>");
     }
 
 
@@ -209,9 +212,12 @@ class ReactVlcPlayerView extends TextureView implements
 
         @Override
         public void onLayoutChange(View view, int i, int i1, int i2, int i3, int i4, int i5, int i6, int i7) {
+            if (mIsInPipMode || mPipModeTransitioning) {
+                return;
+            }
             if (view.getWidth() > 0 && view.getHeight() > 0) {
-                mVideoWidth = view.getWidth(); // 获取宽度
-                mVideoHeight = view.getHeight(); // 获取高度
+                mVideoWidth = view.getWidth();
+                mVideoHeight = view.getHeight();
                 if (mMediaPlayer != null) {
                     IVLCVout vlcOut = mMediaPlayer.getVLCVout();
                     vlcOut.setWindowSize(mVideoWidth, mVideoHeight);
