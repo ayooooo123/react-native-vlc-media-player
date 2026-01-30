@@ -32,15 +32,38 @@ class PipHostActivity : AppCompatActivity() {
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         
+        // Timestamp of last launch to debounce rapid entry attempts
+        @Volatile
+        private var lastLaunchTime: Long = 0
+        private const val LAUNCH_DEBOUNCE_MS = 500L
+
         fun launch(context: Context) {
             if (!VlcPlayerBridge.hasActivePlayer()) {
                 Log.w(TAG, "launch: No active player registered, cannot enter PiP")
                 return
             }
-            
+
+            // Guard against PiP already being active
+            if (VlcPlayerBridge.isPipV2Active()) {
+                Log.w(TAG, "launch: PiP already active, ignoring duplicate launch")
+                return
+            }
+
+            // Debounce rapid launch attempts
+            val now = System.currentTimeMillis()
+            if (now - lastLaunchTime < LAUNCH_DEBOUNCE_MS) {
+                Log.w(TAG, "launch: Debouncing rapid launch attempt")
+                return
+            }
+            lastLaunchTime = now
+
             val intent = Intent(context, PipHostActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or 
-                        Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
+                // Use CLEAR_TOP + SINGLE_TOP to ensure only one instance exists
+                // This prevents multiple PipHostActivity instances from interfering
+                // with the shared MediaPlayer after multiple PiP cycles
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
                         Intent.FLAG_ACTIVITY_NO_ANIMATION
             }
             context.startActivity(intent)
@@ -77,14 +100,21 @@ class PipHostActivity : AppCompatActivity() {
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.d(TAG, "onCreate")
-        
+        Log.d(TAG, "onCreate, isPipV2Active=${VlcPlayerBridge.isPipV2Active()}")
+
         if (!VlcPlayerBridge.hasActivePlayer()) {
             Log.e(TAG, "onCreate: No active player, finishing")
             finish()
             return
         }
-        
+
+        // Guard against duplicate activity instances
+        if (VlcPlayerBridge.isPipV2Active()) {
+            Log.w(TAG, "onCreate: PiP already active from another instance, finishing")
+            finish()
+            return
+        }
+
         VlcPlayerBridge.setPipV2Active(true)
         
         container = FrameLayout(this).apply {

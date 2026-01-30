@@ -121,6 +121,9 @@ class ReactVlcPlayerViewSurface extends FrameLayout implements
     private WritableMap mVideoInfo = null;
     private String mVideoInfoHash = null;
 
+    // Flag to track if we need to reattach surface after PiP exit
+    private volatile boolean mPendingSurfaceReattach = false;
+
     public ReactVlcPlayerViewSurface(ThemedReactContext context) {
         super(context);
         this.eventEmitter = new VideoEventEmitter(context);
@@ -161,9 +164,24 @@ class ReactVlcPlayerViewSurface extends FrameLayout implements
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
-        Log.i(TAG, "surfaceCreated: " + getWidth() + "x" + getHeight());
+        Log.i(TAG, "surfaceCreated: " + getWidth() + "x" + getHeight() + ", pendingReattach=" + mPendingSurfaceReattach);
         mSurfaceHolder = holder;
         isSurfaceReady = true;
+
+        // Check if we need to reattach after PiP exit instead of creating a new player
+        if (mPendingSurfaceReattach && mMediaPlayer != null) {
+            Log.i(TAG, "surfaceCreated: handling pending PiP surface reattachment");
+            IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+            if (!vlcOut.areViewsAttached()) {
+                vlcOut.setVideoView(mSurfaceView);
+                vlcOut.attachViews(onNewVideoLayoutListener);
+                updateVideoSurfaces();
+                Log.i(TAG, "surfaceCreated: surface reattached after PiP exit");
+            }
+            mPendingSurfaceReattach = false;
+            return;
+        }
+
         createPlayer(true, false);
     }
 
@@ -267,15 +285,35 @@ class ReactVlcPlayerViewSurface extends FrameLayout implements
      */
     @Override
     public void onPipSurfaceDetached() {
-        Log.i(TAG, "onPipSurfaceDetached: reattaching surface to player");
+        Log.i(TAG, "onPipSurfaceDetached: reattaching surface to player, surfaceReady=" + isSurfaceReady);
+
         if (mMediaPlayer != null && mSurfaceHolder != null && isSurfaceReady) {
             IVLCVout vlcOut = mMediaPlayer.getVLCVout();
             if (!vlcOut.areViewsAttached()) {
                 vlcOut.setVideoView(mSurfaceView);
                 vlcOut.attachViews(onNewVideoLayoutListener);
-                Log.i(TAG, "onPipSurfaceDetached: surface reattached");
+                Log.i(TAG, "onPipSurfaceDetached: surface reattached immediately");
                 updateVideoSurfaces();
+                mPendingSurfaceReattach = false;
             }
+        } else {
+            // Surface not ready - flag for reattachment when surface is created
+            Log.i(TAG, "onPipSurfaceDetached: surface not ready, flagging for later reattachment");
+            mPendingSurfaceReattach = true;
+
+            // Also try again after a short delay in case surface is being recreated
+            mPipHandler.postDelayed(() -> {
+                if (mPendingSurfaceReattach && mMediaPlayer != null && mSurfaceHolder != null && isSurfaceReady) {
+                    IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+                    if (!vlcOut.areViewsAttached()) {
+                        vlcOut.setVideoView(mSurfaceView);
+                        vlcOut.attachViews(onNewVideoLayoutListener);
+                        Log.i(TAG, "onPipSurfaceDetached: surface reattached after delay");
+                        updateVideoSurfaces();
+                    }
+                    mPendingSurfaceReattach = false;
+                }
+            }, 200);
         }
     }
 

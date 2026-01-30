@@ -24,10 +24,16 @@ interface VlcPlayerBridgeListener {
  */
 private object VlcPipEntryHandler : PipEntryHandler {
     override fun canEnterPip(): Boolean {
-        return VlcPlayerBridge.hasActivePlayer()
+        // Can enter PiP if we have an active player AND PiP isn't already active
+        return VlcPlayerBridge.hasActivePlayer() && !VlcPlayerBridge.isPipV2Active()
     }
 
     override fun enterPip(context: Context) {
+        // Guard against re-entry if PiP is already active
+        if (VlcPlayerBridge.isPipV2Active()) {
+            Log.d("VlcPipEntryHandler", "PiP already active, ignoring")
+            return
+        }
         Log.d("VlcPipEntryHandler", "Launching PipHostActivity")
         PipHostActivity.launch(context)
     }
