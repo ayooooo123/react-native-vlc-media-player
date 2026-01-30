@@ -1,18 +1,27 @@
 package com.yuanzhou.vlc.vlcplayer;
 
 import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.PictureInPictureParams;
+import android.content.ComponentCallbacks2;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.Rational;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.LifecycleEventListener;
 import com.facebook.react.bridge.ReadableArray;
@@ -23,6 +32,7 @@ import com.facebook.react.bridge.WritableArray;
 
 import com.facebook.react.uimanager.ThemedReactContext;
 
+import org.videolan.libvlc.interfaces.IMedia;
 import org.videolan.libvlc.interfaces.IVLCVout;
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
@@ -32,6 +42,8 @@ import org.videolan.libvlc.Dialog;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
+
+import com.yuanzhou.vlc.vlcplayer.pip.PipHostActivity;
 
 
 @SuppressLint("ViewConstructor")
@@ -68,12 +80,30 @@ class ReactVlcPlayerView extends TextureView implements
     private int preVolume = 100;
     private boolean autoAspectRatio = false;
     private boolean acceptInvalidCertificates = false;
+    private boolean mPictureInPictureEnabled = false;
+    private boolean mPlayInPictureInPicture = true;
     private boolean mIsInPipMode = false;
-    private boolean mPipModeTransitioning = false;
+    private boolean mPipTransitionInProgress = false;
+    private int mPipTargetWidth = 0;
+    private int mPipTargetHeight = 0;
+    private int mSurfaceTextureWidth = 0;
+    private int mSurfaceTextureHeight = 0;
+    private ComponentCallbacks2 mPipCallbacks = null;
+    private Handler mPipHandler = new Handler(Looper.getMainLooper());
+    private long mLastPipApplyTime = 0;
+    private static final long PIP_APPLY_DEBOUNCE_MS = 50;
+    private Runnable mPendingPipDimensionCheck = null;
+    private Runnable mPendingPipRestore = null;
+    private ViewTreeObserver.OnGlobalLayoutListener mGlobalLayoutListener = null;
 
     private float mProgressUpdateInterval = 0;
     private Handler mProgressUpdateHandler = new Handler();
     private Runnable mProgressUpdateRunnable = null;
+    
+    private Handler mLayoutHandler = new Handler(Looper.getMainLooper());
+    private Runnable mLayoutRunnable = null;
+    private int mPendingWidth = 0;
+    private int mPendingHeight = 0;
 
     private final ThemedReactContext themedReactContext;
     private final AudioManager audioManager;
@@ -104,18 +134,34 @@ class ReactVlcPlayerView extends TextureView implements
     }
 
     @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (mIsInPipMode && mPipTargetWidth > 0 && mPipTargetHeight > 0) {
+            int w = MeasureSpec.makeMeasureSpec(mPipTargetWidth, MeasureSpec.EXACTLY);
+            int h = MeasureSpec.makeMeasureSpec(mPipTargetHeight, MeasureSpec.EXACTLY);
+            super.onMeasure(w, h);
+            Log.d(TAG, "onMeasure (PiP forced): " + mPipTargetWidth + "x" + mPipTargetHeight);
+        } else {
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
+    }
+
+    @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        //createPlayer();
+        if (mPictureInPictureEnabled) {
+            registerPipCallbacks();
+        }
     }
 
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
-        if (!mIsInPipMode && !mPipModeTransitioning) {
+        cancelPendingPipCallbacks();
+        unregisterPipCallbacks();
+        if (!mIsInPipMode) {
             stopPlayback();
         } else {
-            Log.i(TAG, "Skipping stopPlayback during PiP mode transition");
+            Log.i(TAG, "Skipping stopPlayback during PiP mode");
         }
     }
 
@@ -139,11 +185,37 @@ class ReactVlcPlayerView extends TextureView implements
 
     @Override
     public void onHostPause() {
-        Log.i(TAG, "onHostPause: mIsInPipMode=" + mIsInPipMode + ", mPipModeTransitioning=" + mPipModeTransitioning);
-        if (mIsInPipMode || mPipModeTransitioning) {
-            Log.i(TAG, "Skipping pause during PiP mode");
+        Log.i(TAG, "onHostPause: mIsInPipMode=" + mIsInPipMode + ", pipEnabled=" + mPictureInPictureEnabled);
+        
+        if (mIsInPipMode && mPlayInPictureInPicture) {
+            Log.i(TAG, "Skipping pause - in PiP mode with playInPictureInPicture=true");
             return;
         }
+        
+        if (mPictureInPictureEnabled) {
+            mPipHandler.postDelayed(() -> {
+                boolean inPipNow = false;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    Activity activity = themedReactContext.getCurrentActivity();
+                    if (activity != null) {
+                        inPipNow = activity.isInPictureInPictureMode();
+                    }
+                }
+                
+                if ((mIsInPipMode || inPipNow) && mPlayInPictureInPicture) {
+                    Log.i(TAG, "onHostPause (delayed): Skipping pause - entered PiP");
+                    return;
+                }
+                
+                doPause();
+            }, 150);
+        } else {
+            doPause();
+        }
+    }
+    
+    private void doPause() {
+        Log.i(TAG, "doPause: Pausing playback");
         if (!isPaused && mMediaPlayer != null) {
             isPaused = true;
             isHostPaused = true;
@@ -208,22 +280,60 @@ class ReactVlcPlayerView extends TextureView implements
      * Events  Listener
      *************/
 
+    private static final long LAYOUT_DEBOUNCE_MS = 100;
+    
     private View.OnLayoutChangeListener onLayoutChangeListener = new View.OnLayoutChangeListener() {
 
         @Override
         public void onLayoutChange(View view, int i, int i1, int i2, int i3, int i4, int i5, int i6, int i7) {
-            if (view.getWidth() > 0 && view.getHeight() > 0) {
-                mVideoWidth = view.getWidth();
-                mVideoHeight = view.getHeight();
-                Log.d(TAG, "onLayoutChange: " + mVideoWidth + "x" + mVideoHeight + " pipMode=" + mIsInPipMode);
-                if (mMediaPlayer != null) {
+            int w = view.getWidth();
+            int h = view.getHeight();
+            if (w <= 0 || h <= 0) return;
+            
+            Activity activity = themedReactContext.getCurrentActivity();
+            boolean systemInPip = false;
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                systemInPip = activity.isInPictureInPictureMode();
+            }
+            
+            if (mIsInPipMode || systemInPip) {
+                if (!mIsInPipMode && systemInPip) {
+                    Log.d(TAG, "onLayoutChange: detected PiP before callback, setting flag");
+                    mIsInPipMode = true;
+                    mPipTransitionInProgress = true;
+                    schedulePipDimensionCheck(0);
+                }
+                
+                // In PiP mode, ignore React layout dimensions - trust GlobalLayoutListener
+                // React's layout system doesn't know about PiP window size
+                Log.d(TAG, "onLayoutChange (PiP): ignoring React layout " + w + "x" + h + ", keeping target=" + mPipTargetWidth + "x" + mPipTargetHeight);
+                return;
+            }
+            
+            mPendingWidth = w;
+            mPendingHeight = h;
+            
+            if (mLayoutRunnable != null) {
+                mLayoutHandler.removeCallbacks(mLayoutRunnable);
+            }
+            
+            mLayoutRunnable = () -> {
+                if (mIsInPipMode) {
+                    Log.d(TAG, "onLayoutChange (debounced): skipped (PiP mode)");
+                    return;
+                }
+                if (mMediaPlayer != null && mPendingWidth > 0 && mPendingHeight > 0) {
                     IVLCVout vlcOut = mMediaPlayer.getVLCVout();
-                    vlcOut.setWindowSize(mVideoWidth, mVideoHeight);
+                    vlcOut.setWindowSize(mPendingWidth, mPendingHeight);
+                    updateLastFullscreenSize(mPendingWidth, mPendingHeight);
+                    Log.d(TAG, "onLayoutChange (debounced): setWindowSize(" + mPendingWidth + ", " + mPendingHeight + ")");
                     if (autoAspectRatio) {
-                        mMediaPlayer.setAspectRatio(mVideoWidth + ":" + mVideoHeight);
+                        mMediaPlayer.setAspectRatio(mPendingWidth + ":" + mPendingHeight);
                     }
                 }
-            }
+            };
+            
+            mLayoutHandler.postDelayed(mLayoutRunnable, LAYOUT_DEBOUNCE_MS);
         }
     };
 
@@ -337,8 +447,7 @@ class ReactVlcPlayerView extends TextureView implements
         }
 
     };
-
-
+    
     /*************
      * MediaPlayer
      *************/
@@ -423,12 +532,20 @@ class ReactVlcPlayerView extends TextureView implements
             });
             //this.getHolder().setKeepScreenOn(true);
             IVLCVout vlcOut = mMediaPlayer.getVLCVout();
-            if (mVideoWidth > 0 && mVideoHeight > 0) {
+            if (mVideoWidth > 0 && mVideoHeight > 0 && !mIsInPipMode && !mPipTransitionInProgress) {
                 vlcOut.setWindowSize(mVideoWidth, mVideoHeight);
                 if (autoAspectRatio) {
                     mMediaPlayer.setAspectRatio(mVideoWidth + ":" + mVideoHeight);
                 }
                 //mMediaPlayer.setAspectRatio(mVideoWidth+":"+mVideoHeight);
+            } else if (mIsInPipMode && mPipTargetWidth > 0 && mPipTargetHeight > 0) {
+                if (mSurfaceTextureWidth == mPipTargetWidth && mSurfaceTextureHeight == mPipTargetHeight) {
+                    vlcOut.setWindowSize(mPipTargetWidth, mPipTargetHeight);
+                    Log.d(TAG, "createPlayer: using PiP dimensions " + mPipTargetWidth + "x" + mPipTargetHeight);
+                } else if (mSurfaceTextureWidth > 0 && mSurfaceTextureHeight > 0) {
+                    vlcOut.setWindowSize(mSurfaceTextureWidth, mSurfaceTextureHeight);
+                    Log.d(TAG, "createPlayer: using surface dimensions " + mSurfaceTextureWidth + "x" + mSurfaceTextureHeight + " (PiP size pending)");
+                }
             }
             DisplayMetrics dm = getResources().getDisplayMetrics();
             Media m = null;
@@ -462,7 +579,7 @@ class ReactVlcPlayerView extends TextureView implements
             mVideoInfoHash = null;
             mMediaPlayer.setMedia(m);
             m.release();
-            mMediaPlayer.setScale(0);
+            safeSetScale(0);
             if (_subtitleUri != null) {
                 mMediaPlayer.addSlave(Media.Slave.Type.Subtitle, _subtitleUri, true);
             }
@@ -488,6 +605,7 @@ class ReactVlcPlayerView extends TextureView implements
                     mMediaPlayer.play();
                 }
             }
+            
             eventEmitter.loadStart();
 
             setProgressUpdateRunnable();
@@ -500,11 +618,10 @@ class ReactVlcPlayerView extends TextureView implements
     private void releasePlayer() {
         if (libvlc == null)
             return;
-
+        
         final IVLCVout vout = mMediaPlayer.getVLCVout();
         vout.removeCallback(callback);
         vout.detachViews();
-        //surfaceView.removeOnLayoutChangeListener(onLayoutChangeListener);
         mMediaPlayer.release();
         libvlc.release();
         libvlc = null;
@@ -703,28 +820,58 @@ class ReactVlcPlayerView extends TextureView implements
         autoAspectRatio = auto;
     }
 
+    private void safeSetScale(float scale) {
+        if (mMediaPlayer == null) return;
+        IVLCVout vout = mMediaPlayer.getVLCVout();
+        if (vout != null && vout.areViewsAttached()) {
+            try {
+                mMediaPlayer.setScale(scale);
+            } catch (Exception e) {
+                Log.w(tag, "safeSetScale failed: " + e.getMessage());
+            }
+        }
+    }
+
     public void setAudioTrack(int track) {
-        if (mMediaPlayer != null) {
-            mMediaPlayer.setAudioTrack(track);
+        if (mMediaPlayer == null) return;
+        IMedia.Track[] tracks = mMediaPlayer.getTracks(IMedia.Track.Type.Audio);
+        if (tracks != null) {
+            for (IMedia.Track t : tracks) {
+                if (t.id.hashCode() == track || t.id.equals(String.valueOf(track))) {
+                    mMediaPlayer.selectTrack(t.id);
+                    return;
+                }
+            }
         }
     }
 
     public void setTextTrack(int track) {
-        if (mMediaPlayer != null) {
-            mMediaPlayer.setSpuTrack(track);
+        if (mMediaPlayer == null) return;
+        if (track == -1) {
+            mMediaPlayer.unselectTrackType(IMedia.Track.Type.Text);
+            return;
+        }
+        IMedia.Track[] tracks = mMediaPlayer.getTracks(IMedia.Track.Type.Text);
+        if (tracks != null) {
+            for (IMedia.Track t : tracks) {
+                if (t.id.hashCode() == track || t.id.equals(String.valueOf(track))) {
+                    mMediaPlayer.selectTrack(t.id);
+                    return;
+                }
+            }
         }
     }
 
     public void startRecording(String recordingPath) {
         if(mMediaPlayer == null) return;
         if(recordingPath != null) {
-            mMediaPlayer.record(recordingPath);
+            mMediaPlayer.record(recordingPath, true);
         }
     }
 
     public void stopRecording() {
         if(mMediaPlayer == null) return;
-        mMediaPlayer.record(null);
+        mMediaPlayer.record(null, false);
     }
 
     public void stopPlayer() {
@@ -761,34 +908,463 @@ class ReactVlcPlayerView extends TextureView implements
         Log.i(TAG, "Set acceptInvalidCertificates to: " + accept);
     }
 
-    public void setPipMode(boolean isInPipMode) {
-        Log.i(TAG, "setPipMode: " + isInPipMode + " (was: " + mIsInPipMode + ")");
-        boolean wasInPipMode = mIsInPipMode;
-        mIsInPipMode = isInPipMode;
+    public void setPictureInPictureEnabled(boolean enabled) {
+        Log.i(TAG, "setPictureInPictureEnabled: " + enabled);
+        boolean wasEnabled = mPictureInPictureEnabled;
+        mPictureInPictureEnabled = enabled;
         
-        if (isInPipMode && !wasInPipMode) {
-            mPipModeTransitioning = true;
-        } else if (!isInPipMode && wasInPipMode) {
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                mPipModeTransitioning = false;
-                Log.i(TAG, "PiP transition complete");
-            }, 500);
+        if (enabled && !wasEnabled && isAttachedToWindow()) {
+            registerPipCallbacks();
+        } else if (!enabled && wasEnabled) {
+            unregisterPipCallbacks();
         }
     }
-
-    public void setPipWindowSize(int width, int height) {
-        Log.i(TAG, "setPipWindowSize: " + width + "x" + height);
-        if (mMediaPlayer != null && width > 0 && height > 0) {
+    
+    public void setPlayInPictureInPicture(boolean play) {
+        Log.i(TAG, "setPlayInPictureInPicture: " + play);
+        mPlayInPictureInPicture = play;
+    }
+    
+    public boolean enterPictureInPicture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "enterPictureInPicture: PiP requires API 26+");
+            return false;
+        }
+        
+        if (!mPictureInPictureEnabled) {
+            Log.w(TAG, "enterPictureInPicture: PiP not enabled");
+            return false;
+        }
+        
+        Activity activity = themedReactContext.getCurrentActivity();
+        if (activity == null) {
+            Log.w(TAG, "enterPictureInPicture: No activity");
+            return false;
+        }
+        
+        try {
+            PictureInPictureParams.Builder builder = new PictureInPictureParams.Builder()
+                .setAspectRatio(new Rational(16, 9));
+            
+            Rect sourceRect = getSourceRectHint();
+            if (sourceRect != null) {
+                builder.setSourceRectHint(sourceRect);
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setSeamlessResizeEnabled(false);
+            }
+            
+            return activity.enterPictureInPictureMode(builder.build());
+        } catch (Exception e) {
+            Log.e(TAG, "enterPictureInPicture failed: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    public boolean enterPictureInPictureV2() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Log.w(TAG, "enterPictureInPictureV2: PiP requires API 26+");
+            return false;
+        }
+        
+        if (!mPictureInPictureEnabled) {
+            Log.w(TAG, "enterPictureInPictureV2: PiP not enabled");
+            return false;
+        }
+        
+        try {
+            Log.i(TAG, "enterPictureInPictureV2: Launching PipHostActivity");
+            PipHostActivity.Companion.launch(themedReactContext);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "enterPictureInPictureV2 failed: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private Rect getSourceRectHint() {
+        int[] location = new int[2];
+        getLocationOnScreen(location);
+        return new Rect(
+            location[0],
+            location[1],
+            location[0] + getWidth(),
+            location[1] + getHeight()
+        );
+    }
+    
+    private void registerPipCallbacks() {
+        if (mPipCallbacks != null) return;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        
+        Activity activity = themedReactContext.getCurrentActivity();
+        if (activity == null) return;
+        
+        Log.i(TAG, "Registering PiP callbacks");
+        
+        mPipCallbacks = new ComponentCallbacks2() {
+            @Override
+            public void onConfigurationChanged(Configuration newConfig) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    boolean inPip = activity.isInPictureInPictureMode();
+                    Log.d(TAG, "onConfigurationChanged: inPip=" + inPip + ", mIsInPipMode=" + mIsInPipMode);
+                    if (inPip != mIsInPipMode) {
+                        handlePipModeChanged(inPip);
+                    } else if (inPip && mIsInPipMode) {
+                        handlePipWindowResized();
+                    }
+                }
+            }
+            
+            @Override
+            public void onLowMemory() {}
+            
+            @Override
+            public void onTrimMemory(int level) {}
+        };
+        
+        activity.registerComponentCallbacks(mPipCallbacks);
+        
+        mGlobalLayoutListener = () -> {
+            if (!mIsInPipMode) return;
+            
+            Activity act = themedReactContext.getCurrentActivity();
+            if (act == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return;
+            if (!act.isInPictureInPictureMode()) return;
+            
+            Rect bounds = act.getWindowManager().getCurrentWindowMetrics().getBounds();
+            int w = bounds.width();
+            int h = bounds.height();
+            
+            if (w > 0 && h > 0 && (w != mPipTargetWidth || h != mPipTargetHeight)) {
+                Log.d(TAG, "GlobalLayoutListener (PiP resize): " + mPipTargetWidth + "x" + mPipTargetHeight + " -> " + w + "x" + h);
+                applyPipDimensionsImmediate(w, h);
+            }
+        };
+        getViewTreeObserver().addOnGlobalLayoutListener(mGlobalLayoutListener);
+    }
+    
+    private void unregisterPipCallbacks() {
+        if (mGlobalLayoutListener != null) {
+            getViewTreeObserver().removeOnGlobalLayoutListener(mGlobalLayoutListener);
+            mGlobalLayoutListener = null;
+        }
+        
+        if (mPipCallbacks == null) return;
+        
+        Activity activity = themedReactContext.getCurrentActivity();
+        if (activity != null) {
+            activity.unregisterComponentCallbacks(mPipCallbacks);
+        }
+        mPipCallbacks = null;
+        Log.i(TAG, "Unregistered PiP callbacks");
+    }
+    
+    private void handlePipModeChanged(boolean isInPip) {
+        Log.i(TAG, "handlePipModeChanged: " + isInPip);
+        mIsInPipMode = isInPip;
+        
+        cancelPendingPipCallbacks();
+        
+        if (isInPip) {
+            mPipTransitionInProgress = true;
+            schedulePipDimensionCheck(0);
+        } else {
+            mPipTransitionInProgress = false;
+            clearPipDimensions();
+        }
+        
+        emitPipStatusChanged(isInPip);
+    }
+    
+    private void cancelPendingPipCallbacks() {
+        if (mPendingPipDimensionCheck != null) {
+            mPipHandler.removeCallbacks(mPendingPipDimensionCheck);
+            mPendingPipDimensionCheck = null;
+        }
+        if (mPendingPipRestore != null) {
+            mPipHandler.removeCallbacks(mPendingPipRestore);
+            mPendingPipRestore = null;
+        }
+    }
+    
+    private void schedulePipDimensionCheck(int attempt) {
+        int delay = attempt == 0 ? 16 : (attempt == 1 ? 50 : (attempt == 2 ? 100 : 200));
+        
+        if (mPendingPipDimensionCheck != null) {
+            mPipHandler.removeCallbacks(mPendingPipDimensionCheck);
+        }
+        
+        mPendingPipDimensionCheck = () -> {
+            mPendingPipDimensionCheck = null;
+            
+            if (!mIsInPipMode) {
+                mPipTransitionInProgress = false;
+                return;
+            }
+            
+            int viewW = getWidth();
+            int viewH = getHeight();
+            
+            Activity activity = themedReactContext.getCurrentActivity();
+            int windowW = 0;
+            int windowH = 0;
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
+                windowW = bounds.width();
+                windowH = bounds.height();
+            }
+            
+            Log.i(TAG, "PiP dimension check #" + attempt + ": view=" + viewW + "x" + viewH + ", window=" + windowW + "x" + windowH);
+            
+            int w = (windowW > 0 && windowW < viewW) ? windowW : viewW;
+            int h = (windowH > 0 && windowH < viewH) ? windowH : viewH;
+            
+            boolean dimensionsLookLikePip = (w > 0 && h > 0 && w < 1000 && h < 800);
+            
+            if (dimensionsLookLikePip) {
+                applyPipDimensionsImmediate(w, h);
+            }
+            
+            if (attempt < 6) {
+                schedulePipDimensionCheck(attempt + 1);
+            } else {
+                mPipTransitionInProgress = false;
+                Log.i(TAG, "PiP dimension check: transition complete");
+            }
+        };
+        
+        mPipHandler.postDelayed(mPendingPipDimensionCheck, delay);
+    }
+    
+    private int mLastFullscreenWidth = 0;
+    private int mLastFullscreenHeight = 0;
+    
+    private void updateLastFullscreenSize(int width, int height) {
+        if (width > 500 && height > 500 && !mIsInPipMode) {
+            mLastFullscreenWidth = width;
+            mLastFullscreenHeight = height;
+        }
+    }
+    
+    private void forceVideoReinit(int width, int height) {
+        if (mMediaPlayer == null) return;
+        
+        Log.i(TAG, "forceVideoReinit: " + width + "x" + height);
+        
+        try {
             IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+            
+            if (vlcOut.areViewsAttached()) {
+                vlcOut.detachViews();
+            }
+            
+            SurfaceTexture surfaceTexture = this.getSurfaceTexture();
+            if (surfaceTexture != null) {
+                surfaceTexture.setDefaultBufferSize(width, height);
+                vlcOut.setVideoSurface(surfaceTexture);
+            }
+            
             vlcOut.setWindowSize(width, height);
-            mVideoWidth = width;
-            mVideoHeight = height;
+            vlcOut.attachViews(onNewVideoLayoutListener);
+            
+            mMediaPlayer.setAspectRatio(width + ":" + height);
+            safeSetScale(0);
+            
+            Log.i(TAG, "forceVideoReinit complete");
+        } catch (Exception e) {
+            Log.e(TAG, "forceVideoReinit failed: " + e.getMessage());
         }
     }
+    
+    private void applyPipDimensionsImmediate(int pipWindowWidth, int pipWindowHeight) {
+        long now = System.currentTimeMillis();
+        if (now - mLastPipApplyTime < PIP_APPLY_DEBOUNCE_MS && 
+            pipWindowWidth == mPipTargetWidth && pipWindowHeight == mPipTargetHeight) {
+            return;
+        }
+        mLastPipApplyTime = now;
+        
+        boolean dimensionsChanged = (pipWindowWidth != mPipTargetWidth || pipWindowHeight != mPipTargetHeight);
+        boolean significantChange = dimensionsChanged && mPipTargetWidth > 0 && mPipTargetHeight > 0;
+        
+        mPipTargetWidth = pipWindowWidth;
+        mPipTargetHeight = pipWindowHeight;
+        
+        if (mMediaPlayer == null) return;
+        
+        Log.i(TAG, "PiP apply: " + pipWindowWidth + "x" + pipWindowHeight + ", significantChange=" + significantChange);
+        
+        if (significantChange) {
+            forceVideoReinit(pipWindowWidth, pipWindowHeight);
+        } else {
+            IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+            vlcOut.setWindowSize(pipWindowWidth, pipWindowHeight);
+            mMediaPlayer.setAspectRatio(pipWindowWidth + ":" + pipWindowHeight);
+            safeSetScale(0);
+        }
+    }
+    
+    private void clearPipScaleTransform() {
+        setTransform(null);
+        Log.i(TAG, "PiP: cleared transform");
+    }
+    
+    private void applyPipDimensionsWithRetry(int attempt) {
+        int delay = attempt == 0 ? 150 : (attempt == 1 ? 350 : 600);
+        
+        mPipHandler.postDelayed(() -> {
+            if (!mIsInPipMode) {
+                mPipTransitionInProgress = false;
+                return;
+            }
+            
+            Activity activity = themedReactContext.getCurrentActivity();
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
+                int w = bounds.width();
+                int h = bounds.height();
+                Log.i(TAG, "PiP verify attempt " + attempt + ": " + w + "x" + h + " (current: " + mPipTargetWidth + "x" + mPipTargetHeight + ")");
+                if (w > 0 && h > 0 && (w != mPipTargetWidth || h != mPipTargetHeight)) {
+                    applyPipDimensionsImmediate(w, h);
+                }
+            }
+            
+            if (attempt < 2) {
+                applyPipDimensionsWithRetry(attempt + 1);
+            } else {
+                mPipTransitionInProgress = false;
+                Log.i(TAG, "PiP transition complete");
+            }
+        }, delay);
+    }
+    
+    private void handlePipWindowResized() {
+        mPipHandler.postDelayed(() -> {
+            if (!mIsInPipMode) return;
+            
+            Activity activity = themedReactContext.getCurrentActivity();
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
+                int w = bounds.width();
+                int h = bounds.height();
+                
+                if (w > 0 && h > 0 && (w != mPipTargetWidth || h != mPipTargetHeight)) {
+                    Log.i(TAG, "PiP window resized: " + mPipTargetWidth + "x" + mPipTargetHeight + " -> " + w + "x" + h);
+                    applyPipDimensionsImmediate(w, h);
+                }
+            }
+        }, 50);
+    }
+    
+    private void clearPipDimensions() {
+        mPipTargetWidth = 0;
+        mPipTargetHeight = 0;
+        
+        clearPipScaleTransform();
+        
+        Log.i(TAG, "Exited PiP mode");
+        
+        emitPipStatusChanged(false);
+        
+        restoreWindowSizeAfterPip(0);
+    }
+    
+    private void restoreWindowSizeAfterPip(int attempt) {
+        if (mPendingPipRestore != null) {
+            mPipHandler.removeCallbacks(mPendingPipRestore);
+        }
+        
+        mPendingPipRestore = () -> {
+            mPendingPipRestore = null;
+            
+            if (mIsInPipMode) {
+                Log.i(TAG, "Post-PiP restore: cancelled, back in PiP");
+                return;
+            }
+            
+            int w = getWidth();
+            int h = getHeight();
+            
+            Activity activity = themedReactContext.getCurrentActivity();
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !activity.isInPictureInPictureMode()) {
+                Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
+                if (bounds.width() > w) {
+                    w = bounds.width();
+                    h = bounds.height();
+                }
+            }
+            
+            Log.i(TAG, "Post-PiP restore attempt " + attempt + ": size " + w + "x" + h);
+            
+            boolean needsRetry = (w <= 0 || h <= 0 || w < 400);
+            
+            if (mMediaPlayer != null && w > 0 && h > 0) {
+                forceVideoReinit(w, h);
+                mMediaPlayer.setAspectRatio(null);
+                Log.i(TAG, "Post-PiP restore: forceVideoReinit(" + w + ", " + h + ")");
+            }
+            
+            if (needsRetry && attempt < 5) {
+                restoreWindowSizeAfterPip(attempt + 1);
+            }
+        };
+        
+        mPipHandler.postDelayed(mPendingPipRestore, attempt == 0 ? 100 : 200);
+    }
+    
+    private void emitPipStatusChanged(boolean isInPip) {
+        Activity activity = themedReactContext.getCurrentActivity();
+        int width = 0;
+        int height = 0;
+        
+        if (activity != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Rect bounds = activity.getWindowManager().getCurrentWindowMetrics().getBounds();
+                width = bounds.width();
+                height = bounds.height();
+            } else {
+                width = getWidth();
+                height = getHeight();
+            }
+        }
+        
+        WritableMap event = Arguments.createMap();
+        event.putBoolean("isInPictureInPicture", isInPip);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        float density = dm.density;
+        int widthDp = density > 0 ? Math.round(width / density) : width;
+        int heightDp = density > 0 ? Math.round(height / density) : height;
+        event.putInt("width", widthDp);
+        event.putInt("height", heightDp);
+        eventEmitter.sendEvent(event, VideoEventEmitter.EVENT_PIP_STATUS_CHANGED);
+    }
+    
+    @Deprecated
+    public void setPipMode(boolean isInPipMode) {
+        Log.i(TAG, "setPipMode (deprecated): " + isInPipMode);
+        handlePipModeChanged(isInPipMode);
+    }
+    
+    @Deprecated
+    public void setPipWindowSize(int width, int height) {
+        Log.i(TAG, "setPipWindowSize (deprecated): " + width + "x" + height);
+        if (width > 0 && height > 0) {
+            applyPipDimensionsImmediate(width, height);
+        }
+    }
+    
+
 
     public void updateVideoSurfaces() {
         if (mMediaPlayer == null) {
             Log.w(TAG, "updateVideoSurfaces: no media player");
+            return;
+        }
+        
+        if (mIsInPipMode || mPipTransitionInProgress) {
+            Log.d(TAG, "updateVideoSurfaces: skipped (PiP mode or transition)");
             return;
         }
         
@@ -828,13 +1404,68 @@ class ReactVlcPlayerView extends TextureView implements
     public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
         mVideoWidth = width;
         mVideoHeight = height;
+        mSurfaceTextureWidth = width;
+        mSurfaceTextureHeight = height;
+        updateLastFullscreenSize(width, height);
         surfaceVideo = new Surface(surface);
         createPlayer(true, false);
     }
 
     @Override
     public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+        Log.i(TAG, "onSurfaceTextureSizeChanged: " + width + "x" + height + ", inPip=" + mIsInPipMode + ", transition=" + mPipTransitionInProgress);
+        
+        if (width == mSurfaceTextureWidth && height == mSurfaceTextureHeight) {
+            return;
+        }
+        
+        mSurfaceTextureWidth = width;
+        mSurfaceTextureHeight = height;
 
+        if (mPipTransitionInProgress) {
+            Log.d(TAG, "onSurfaceTextureSizeChanged: skipping during transition");
+            return;
+        }
+
+        if (mIsInPipMode && mPipTargetWidth > 0 && mPipTargetHeight > 0) {
+            if (mMediaPlayer != null) {
+                IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+                vlcOut.setWindowSize(mPipTargetWidth, mPipTargetHeight);
+                mMediaPlayer.setAspectRatio(mPipTargetWidth + ":" + mPipTargetHeight);
+                safeSetScale(0);
+                Log.i(TAG, "onSurfaceTextureSizeChanged (PiP): applied " + mPipTargetWidth + "x" + mPipTargetHeight);
+            }
+            return;
+        }
+        
+        boolean dimensionsLookLikePip = (width > 0 && height > 0 && width < 1000 && height < 800);
+        if (dimensionsLookLikePip && !mIsInPipMode) {
+            Activity activity = themedReactContext.getCurrentActivity();
+            boolean systemInPip = false;
+            if (activity != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                systemInPip = activity.isInPictureInPictureMode();
+            }
+            if (systemInPip) {
+                Log.d(TAG, "onSurfaceTextureSizeChanged: detected PiP before flag update");
+                mIsInPipMode = true;
+                mPipTargetWidth = width;
+                mPipTargetHeight = height;
+                applyPipDimensionsImmediate(width, height);
+                return;
+            }
+        }
+        
+        if (dimensionsLookLikePip) {
+            if (mMediaPlayer != null) {
+                IVLCVout vlcOut = mMediaPlayer.getVLCVout();
+                vlcOut.setWindowSize(width, height);
+                mMediaPlayer.setAspectRatio(null);
+                safeSetScale(0);
+                Log.i(TAG, "onSurfaceTextureSizeChanged: applied " + width + "x" + height);
+            }
+            mPipTargetWidth = width;
+            mPipTargetHeight = height;
+        }
     }
 
     @Override
@@ -847,94 +1478,85 @@ class ReactVlcPlayerView extends TextureView implements
         // Log.i("onSurfaceTextureUpdated", "onSurfaceTextureUpdated");
     }
 
-    private final Media.EventListener mMediaListener = new Media.EventListener() {
+    private final IMedia.EventListener mMediaListener = new IMedia.EventListener() {
         @Override
-        public void onEvent(Media.Event event) {
+        public void onEvent(IMedia.Event event) {
             switch (event.type) {
-                case Media.Event.MetaChanged:
-                    Log.i(tag, "Media.Event.MetaChanged:  =" + event.getMetaId());
+                case IMedia.Event.MetaChanged:
+                    Log.i(tag, "IMedia.Event.MetaChanged:  =" + event.getMetaId());
                     break;
-                case Media.Event.ParsedChanged:
-                    Log.i(tag, "Media.Event.ParsedChanged  =" + event.getMetaId());
-
-                    break;
-                case Media.Event.StateChanged:
-                    Log.i(tag, "StateChanged   =" + event.getMetaId());
+                case IMedia.Event.ParsedChanged:
+                    Log.i(tag, "IMedia.Event.ParsedChanged  =" + event.getMetaId());
                     break;
                 default:
-                    Log.i(tag, "Media.Event.type=" + event.type + "   eventgetParsedStatus=" + event.getParsedStatus());
+                    Log.i(tag, "IMedia.Event.type=" + event.type + "   eventgetParsedStatus=" + event.getParsedStatus());
                     break;
-
             }
         }
     };
 
     private void updateVideoInfo() {
-        // Create a hash of the video info to compare for changes
         StringBuilder infoHash = new StringBuilder();
         
         infoHash.append("duration:").append(mMediaPlayer.getLength()).append(";");
         
-        if(mMediaPlayer.getAudioTracksCount() > 0) {
-            MediaPlayer.TrackDescription[] audioTracks = mMediaPlayer.getAudioTracks();
+        IMedia.Track[] audioTracks = mMediaPlayer.getTracks(IMedia.Track.Type.Audio);
+        if (audioTracks != null && audioTracks.length > 0) {
             infoHash.append("audioTracks:");
-            for (MediaPlayer.TrackDescription track : audioTracks) {
+            for (IMedia.Track track : audioTracks) {
                 infoHash.append(track.id).append(":").append(track.name).append(",");
             }
             infoHash.append(";");
         }
 
-        if(mMediaPlayer.getSpuTracksCount() > 0) {
-            MediaPlayer.TrackDescription[] spuTracks = mMediaPlayer.getSpuTracks();
+        IMedia.Track[] spuTracks = mMediaPlayer.getTracks(IMedia.Track.Type.Text);
+        if (spuTracks != null && spuTracks.length > 0) {
             infoHash.append("textTracks:");
-            for (MediaPlayer.TrackDescription track : spuTracks) {
+            for (IMedia.Track track : spuTracks) {
                 infoHash.append(track.id).append(":").append(track.name).append(",");
             }
             infoHash.append(";");
         }
 
-        Media.VideoTrack video = mMediaPlayer.getCurrentVideoTrack();
-        if(video != null) {
+        IMedia.Track videoTrack = mMediaPlayer.getSelectedTrack(IMedia.Track.Type.Video);
+        IMedia.VideoTrack video = (videoTrack instanceof IMedia.VideoTrack) ? (IMedia.VideoTrack) videoTrack : null;
+        if (video != null) {
             infoHash.append("videoSize:").append(video.width).append("x").append(video.height).append(";");
         }
         
         String currentHash = infoHash.toString();
         
-        // Only send update if info has changed
         if (mVideoInfoHash == null || !mVideoInfoHash.equals(currentHash)) {
             WritableMap info = Arguments.createMap();
 
             info.putDouble("duration", mMediaPlayer.getLength());
 
-            if(mMediaPlayer.getAudioTracksCount() > 0) {
-                MediaPlayer.TrackDescription[] audioTracks = mMediaPlayer.getAudioTracks();
+            if (audioTracks != null && audioTracks.length > 0) {
                 WritableArray tracks = new WritableNativeArray();
-                for (MediaPlayer.TrackDescription track : audioTracks) {
+                for (IMedia.Track track : audioTracks) {
                     WritableMap trackMap = Arguments.createMap();
-                    trackMap.putInt("id", track.id);
+                    trackMap.putInt("id", track.id.hashCode());
                     trackMap.putString("name", track.name);
                     tracks.pushMap(trackMap);
                 }
                 info.putArray("audioTracks", tracks);
             }
 
-            if(mMediaPlayer.getSpuTracksCount() > 0) {
-                MediaPlayer.TrackDescription[] spuTracks = mMediaPlayer.getSpuTracks();
+            if (spuTracks != null && spuTracks.length > 0) {
                 WritableArray tracks = new WritableNativeArray();
-                for (MediaPlayer.TrackDescription track : spuTracks) {
+                for (IMedia.Track track : spuTracks) {
                     WritableMap trackMap = Arguments.createMap();
-                    trackMap.putInt("id", track.id);
+                    trackMap.putInt("id", track.id.hashCode());
                     trackMap.putString("name", track.name);
                     tracks.pushMap(trackMap);
                 }
                 info.putArray("textTracks", tracks);
             }
 
-            Media.VideoTrack video2 = mMediaPlayer.getCurrentVideoTrack();
-            if(video2 != null) {
+            if (video != null) {
                 WritableMap mapVideoSize = Arguments.createMap();
-                mapVideoSize.putInt("width", video2.width);
-                mapVideoSize.putInt("height", video2.height);
+                mapVideoSize.putInt("width", video.width);
+                mapVideoSize.putInt("height", video.height);
                 info.putMap("videoSize", mapVideoSize);
             }
             

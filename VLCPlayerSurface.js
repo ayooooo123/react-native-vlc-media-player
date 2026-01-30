@@ -6,9 +6,9 @@ const { Component } = React;
 import PropTypes from "prop-types";
 import resolveAssetSource from "react-native/Libraries/Image/resolveAssetSource";
 
-const { StyleSheet, requireNativeComponent, NativeModules, View, UIManager } = ReactNative;
+const { StyleSheet, requireNativeComponent, View, UIManager } = ReactNative;
 
-export default class VLCPlayer extends Component {
+export default class VLCPlayerSurface extends Component {
   constructor(props, context) {
     super(props, context);
     this.seek = this.seek.bind(this);
@@ -27,10 +27,11 @@ export default class VLCPlayer extends Component {
     this._onRecordingState = this._onRecordingState.bind(this);
     this._onSnapshot = this._onSnapshot.bind(this);
     this._onPictureInPictureStatusChanged = this._onPictureInPictureStatusChanged.bind(this);
+    this._onVideoStateChange = this._onVideoStateChange.bind(this);
     this.changeVideoAspectRatio = this.changeVideoAspectRatio.bind(this);
     this.enterPictureInPicture = this.enterPictureInPicture.bind(this);
-    this.enterPictureInPictureV2 = this.enterPictureInPictureV2.bind(this);
   }
+  
   static defaultProps = {
     autoplay: true,
   };
@@ -42,8 +43,7 @@ export default class VLCPlayer extends Component {
   startRecording(path) {
     UIManager.dispatchViewManagerCommand(
       ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands
-        .startRecording,
+      UIManager.getViewManagerConfig('RCTVLCPlayerSurface').Commands.startRecording,
       [path],
     );
   }
@@ -51,15 +51,7 @@ export default class VLCPlayer extends Component {
   stopRecording() {
     UIManager.dispatchViewManagerCommand(
       ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands.stopRecording,
-      []
-    );
-  }
-
-  stopPlayer() {
-    UIManager.dispatchViewManagerCommand(
-      ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands.stopPlayer,
+      UIManager.getViewManagerConfig('RCTVLCPlayerSurface').Commands.stopRecording,
       []
     );
   }
@@ -67,7 +59,7 @@ export default class VLCPlayer extends Component {
   snapshot(path) {
     UIManager.dispatchViewManagerCommand(
       ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands.snapshot,
+      UIManager.getViewManagerConfig('RCTVLCPlayerSurface').Commands.snapshot,
       [path]
     );
   }
@@ -75,15 +67,7 @@ export default class VLCPlayer extends Component {
   enterPictureInPicture() {
     UIManager.dispatchViewManagerCommand(
       ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands.enterPictureInPicture,
-      []
-    );
-  }
-
-  enterPictureInPictureV2() {
-    UIManager.dispatchViewManagerCommand(
-      ReactNative.findNodeHandle(this),
-      UIManager.getViewManagerConfig('RCTVLCPlayer').Commands.enterPictureInPictureV2,
+      UIManager.getViewManagerConfig('RCTVLCPlayerSurface').Commands.enterPictureInPicture,
       []
     );
   }
@@ -192,10 +176,13 @@ export default class VLCPlayer extends Component {
     }
   }
 
+  _onVideoStateChange(event) {
+    if (this.props.onVideoStateChange) {
+      this.props.onVideoStateChange(event.nativeEvent);
+    }
+  }
+
   render() {
-    /* const {
-     source
-     } = this.props;*/
     const source = resolveAssetSource(this.props.source) || {};
 
     let uri = source.uri || "";
@@ -250,20 +237,19 @@ export default class VLCPlayer extends Component {
       onRecordingState: this._onRecordingState,
       onSnapshot: this._onSnapshot,
       onPictureInPictureStatusChanged: this._onPictureInPictureStatusChanged,
+      onVideoStateChange: this._onVideoStateChange,
       progressUpdateInterval: this.props.onProgress ? 250 : 0,
     });
 
-    return <RCTVLCPlayer ref={this._assignRoot} {...nativeProps} />;
+    return <RCTVLCPlayerSurface ref={this._assignRoot} {...nativeProps} />;
   }
 }
 
-VLCPlayer.propTypes = {
-  /* Native only */
+VLCPlayerSurface.propTypes = {
   rate: PropTypes.number,
   seek: PropTypes.number,
   resume: PropTypes.bool,
   paused: PropTypes.bool,
-
   autoAspectRatio: PropTypes.bool,
   videoAspectRatio: PropTypes.string,
   volume: PropTypes.number,
@@ -280,7 +266,6 @@ VLCPlayer.propTypes = {
   acceptInvalidCertificates: PropTypes.bool,
   pictureInPictureEnabled: PropTypes.bool,
   playInPictureInPicture: PropTypes.bool,
-
   onVideoLoadStart: PropTypes.func,
   onVideoError: PropTypes.func,
   onVideoProgress: PropTypes.func,
@@ -292,12 +277,10 @@ VLCPlayer.propTypes = {
   onVideoOpen: PropTypes.func,
   onVideoLoad: PropTypes.func,
   onPictureInPictureStatusChanged: PropTypes.func,
-
-  /* Wrapper component */
+  onVideoStateChange: PropTypes.func,
   source: PropTypes.oneOfType([PropTypes.object, PropTypes.number]),
   subtitleUri: PropTypes.string,
   autoplay: PropTypes.bool,
-
   onError: PropTypes.func,
   onProgress: PropTypes.func,
   onEnded: PropTypes.func,
@@ -305,8 +288,6 @@ VLCPlayer.propTypes = {
   onPlaying: PropTypes.func,
   onPaused: PropTypes.func,
   onRecordingCreated: PropTypes.func,
-
-  /* Required by react-native */
   scaleX: PropTypes.number,
   scaleY: PropTypes.number,
   translateX: PropTypes.number,
@@ -320,4 +301,5 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 });
-const RCTVLCPlayer = requireNativeComponent("RCTVLCPlayer", VLCPlayer);
+
+const RCTVLCPlayerSurface = requireNativeComponent("RCTVLCPlayerSurface", VLCPlayerSurface);

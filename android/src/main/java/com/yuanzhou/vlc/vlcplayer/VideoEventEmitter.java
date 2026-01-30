@@ -38,6 +38,7 @@ class VideoEventEmitter {
     public static final String EVENT_ON_LOAD = "onVideoLoad";
     public static final String EVENT_RECORDING_STATE = "onRecordingState";
     public static final String EVENT_ON_SNAPSHOT = "onSnapshot";
+    public static final String EVENT_PIP_STATUS_CHANGED = "onPictureInPictureStatusChanged";
 
     static final String[] Events = {
             EVENT_LOAD_START,
@@ -53,7 +54,8 @@ class VideoEventEmitter {
             EVENT_ON_VIDEO_STOPPED,
             EVENT_ON_LOAD,
             EVENT_RECORDING_STATE,
-            EVENT_ON_SNAPSHOT
+            EVENT_ON_SNAPSHOT,
+            EVENT_PIP_STATUS_CHANGED
     };
 
     @Retention(RetentionPolicy.SOURCE)
@@ -71,7 +73,8 @@ class VideoEventEmitter {
             EVENT_ON_VIDEO_STOPPED,
             EVENT_ON_LOAD,
             EVENT_RECORDING_STATE,
-            EVENT_ON_SNAPSHOT
+            EVENT_ON_SNAPSHOT,
+            EVENT_PIP_STATUS_CHANGED
     })
 
     @interface VideoEvents {
@@ -137,6 +140,10 @@ class VideoEventEmitter {
 
     void sendEvent(WritableMap map, String event) {
         receiveEvent(event, map);
+    }
+
+    void onPictureInPictureStatusChanged(WritableMap map) {
+        receiveEvent(EVENT_PIP_STATUS_CHANGED, map);
     }
 
     private void receiveEvent(@VideoEvents String type, WritableMap event) {

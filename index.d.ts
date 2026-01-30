@@ -187,6 +187,18 @@ export type VLCPlayerCallbackProps = {
     path?: string;
     error?: string;
   }) => void;
+
+  /**
+   * Called when Picture-in-Picture mode changes
+   *
+   * @param event - Event properties
+   * @platform android
+   */
+  onPictureInPictureStatusChanged?: (event: {
+    isInPictureInPicture: boolean;
+    width: number;
+    height: number;
+  }) => void;
 };
 
 export type VLCPlayerProps = VLCPlayerCallbackProps & {
@@ -289,6 +301,22 @@ export type VLCPlayerProps = VLCPlayerCallbackProps & {
    * @default false
    */
   acceptInvalidCertificates?: boolean;
+
+  /**
+   * Enable Picture-in-Picture support. When true, the player handles PiP lifecycle automatically.
+   *
+   * @platform android
+   * @default false
+   */
+  pictureInPictureEnabled?: boolean;
+
+  /**
+   * Continue playback when entering PiP mode. If false, video pauses when PiP starts.
+   *
+   * @platform android
+   * @default true
+   */
+  playInPictureInPicture?: boolean;
 };
 
 declare class PlaybackMethods<T> extends Component<T> {
@@ -340,6 +368,14 @@ declare class PlaybackMethods<T> extends Component<T> {
    * @param ratio Aspect ratio to use
    */
   changeVideoAspectRatio(ratio: string);
+
+  /**
+   * Enter Picture-in-Picture mode programmatically.
+   * Requires pictureInPictureEnabled={true}
+   *
+   * @platform android
+   */
+  enterPictureInPicture(): void;
 }
 
 /**

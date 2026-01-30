@@ -7,10 +7,12 @@ import com.facebook.react.bridge.NativeModule;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.uimanager.ViewManager;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import com.yuanzhou.vlc.vlcplayer.ReactVlcPlayerViewManager;
+import com.yuanzhou.vlc.vlcplayer.ReactVlcPlayerSurfaceViewManager;
 
 public class ReactVlcPlayerPackage implements ReactPackage {
 
@@ -26,6 +28,9 @@ public class ReactVlcPlayerPackage implements ReactPackage {
 
     @Override
     public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
-        return Collections.<ViewManager>singletonList(new ReactVlcPlayerViewManager());
+        return Arrays.<ViewManager>asList(
+            new ReactVlcPlayerViewManager(),
+            new ReactVlcPlayerSurfaceViewManager()
+        );
     }
 }

@@ -39,6 +39,8 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
     private static final String PROP_AUDIO_TRACK = "audioTrack";
     private static final String PROP_RECORDING_PATH = "recordingPath";
     private static final String PROP_ACCEPT_INVALID_CERTIFICATES = "acceptInvalidCertificates";
+    private static final String PROP_PICTURE_IN_PICTURE_ENABLED = "pictureInPictureEnabled";
+    private static final String PROP_PLAY_IN_PICTURE_IN_PICTURE = "playInPictureInPicture";
 
 
     @Override
@@ -158,6 +160,16 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
         videoView.setAcceptInvalidCertificates(accept);
     }
 
+    @ReactProp(name = PROP_PICTURE_IN_PICTURE_ENABLED, defaultBoolean = false)
+    public void setPictureInPictureEnabled(final ReactVlcPlayerView videoView, final boolean enabled) {
+        videoView.setPictureInPictureEnabled(enabled);
+    }
+
+    @ReactProp(name = PROP_PLAY_IN_PICTURE_IN_PICTURE, defaultBoolean = true)
+    public void setPlayInPictureInPicture(final ReactVlcPlayerView videoView, final boolean play) {
+        videoView.setPlayInPictureInPicture(play);
+    }
+
     public void startRecording(final ReactVlcPlayerView videoView, final String recordingPath) {
         videoView.startRecording(recordingPath);
     }
@@ -183,6 +195,8 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
         builder.put("setPipMode", 4);
         builder.put("updateVideoSurfaces", 5);
         builder.put("setPipWindowSize", 6);
+        builder.put("enterPictureInPicture", 7);
+        builder.put("enterPictureInPictureV2", 8);
         return builder.build();
     }
 
@@ -224,6 +238,14 @@ public class ReactVlcPlayerViewManager extends SimpleViewManager<ReactVlcPlayerV
                     int height = args.getInt(1);
                     root.setPipWindowSize(width, height);
                 }
+                break;
+
+            case 7:
+                root.enterPictureInPicture();
+                break;
+
+            case 8:
+                root.enterPictureInPictureV2();
                 break;
 
             default:
